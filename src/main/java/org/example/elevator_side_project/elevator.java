@@ -124,6 +124,19 @@ public class elevator {
     // Tick every X milliseconds configured in properties
     @Scheduled(fixedRateString = "${elevator.config.move-delay-ms:1000}")
     public void tick() {
+        if (handleDoorTimer()) return;
+        if (currentDirection == Direction.STOP) return;
+
+        boolean stateChanged = processMovement(currentDirection);
+
+        if (stateChanged) {
+            log.info("Elevator State: Floor={}, Direction={}, UPQueue={}, DOWNQueue={}", 
+                currentFloor, currentDirection, upRequests, downRequests);
+            broadcastState();
+        }
+    }
+
+    private boolean handleDoorTimer() {
         if (doorState == DoorState.OPEN) {
             if (doorTimer > 0) {
                 doorTimer--;
@@ -133,78 +146,53 @@ public class elevator {
                     broadcastState();
                 }
             }
-            return; // Cannot move while doors are open
+            return true; // Cannot move while doors are open
         }
+        return false;
+    }
 
-        if (currentDirection == Direction.STOP) {
-            return;
-        }
+    private boolean processMovement(Direction direction) {
+        boolean isUp = (direction == Direction.UP);
+        TreeSet<Integer> primaryRequests = isUp ? upRequests : downRequests;
+        TreeSet<Integer> primaryHallRequests = isUp ? upHallRequests : downHallRequests;
+        TreeSet<Integer> oppositeRequests = isUp ? downRequests : upRequests;
 
-        boolean stateChanged = false;
-
-        if (currentDirection == Direction.UP) {
-            if (upRequests.contains(currentFloor) || carRequests.contains(currentFloor)) {
-                upRequests.remove(currentFloor);
-                upHallRequests.remove(currentFloor);
-                carRequests.remove(currentFloor);
-                log.info("Stopped at floor {} to serve UP request", currentFloor);
-                doorState = DoorState.OPEN;
-                doorTimer = 3;
-                stateChanged = true;
-                broadcastState();
-                return; // Stop processing movement this tick
-            }
-            
-            boolean hasRequestsAbove = 
-                (!upRequests.isEmpty() && upRequests.last() > currentFloor) ||
-                (!downRequests.isEmpty() && downRequests.first() > currentFloor);
-
-            if (hasRequestsAbove) {
-                currentFloor++;
-                stateChanged = true;
-            } else {
-                if (!downRequests.isEmpty() || !upRequests.isEmpty()) {
-                    currentDirection = Direction.DOWN;
-                } else {
-                    currentDirection = Direction.STOP;
-                }
-                stateChanged = true;
-            }
-        } else if (currentDirection == Direction.DOWN) {
-            if (downRequests.contains(currentFloor) || carRequests.contains(currentFloor)) {
-                downRequests.remove(currentFloor);
-                downHallRequests.remove(currentFloor);
-                carRequests.remove(currentFloor);
-                log.info("Stopped at floor {} to serve DOWN request", currentFloor);
-                doorState = DoorState.OPEN;
-                doorTimer = 3;
-                stateChanged = true;
-                broadcastState();
-                return; // Stop processing movement this tick
-            }
-
-            boolean hasRequestsBelow = 
-                (!downRequests.isEmpty() && downRequests.last() < currentFloor) ||
-                (!upRequests.isEmpty() && upRequests.first() < currentFloor);
-
-            if (hasRequestsBelow) {
-                currentFloor--;
-                stateChanged = true;
-            } else {
-                if (!upRequests.isEmpty() || !downRequests.isEmpty()) {
-                    currentDirection = Direction.UP;
-                } else {
-                    currentDirection = Direction.STOP;
-                }
-                stateChanged = true;
-            }
-        }
-
-        if (stateChanged) {
-            log.info("Elevator State: Floor={}, Direction={}, UPQueue={}, DOWNQueue={}", 
-                currentFloor, currentDirection, upRequests, downRequests);
+        // 1. Check if we need to stop at the current floor
+        if (primaryRequests.contains(currentFloor) || carRequests.contains(currentFloor)) {
+            primaryRequests.remove(currentFloor);
+            primaryHallRequests.remove(currentFloor);
+            carRequests.remove(currentFloor);
+            log.info("Stopped at floor {} to serve {} request", currentFloor, direction);
+            doorState = DoorState.OPEN;
+            doorTimer = 3;
             broadcastState();
+            return false; // Stop processing movement this tick (no stateChanged to broadcast again)
         }
+
+        // 2. Check if we should continue moving in the current direction
+        boolean hasMoreRequestsInDirection = isUp ? hasRequestsAbove() : hasRequestsBelow();
+
+        if (hasMoreRequestsInDirection) {
+            currentFloor += isUp ? 1 : -1;
+        } else {
+            // 3. Turn around or stop
+            if (!primaryRequests.isEmpty() || !oppositeRequests.isEmpty()) {
+                currentDirection = isUp ? Direction.DOWN : Direction.UP;
+            } else {
+                currentDirection = Direction.STOP;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasRequestsAbove() {
+        return (!upRequests.isEmpty() && upRequests.last() > currentFloor) ||
+               (!downRequests.isEmpty() && downRequests.first() > currentFloor);
+    }
+
+    private boolean hasRequestsBelow() {
+        return (!downRequests.isEmpty() && downRequests.last() < currentFloor) ||
+               (!upRequests.isEmpty() && upRequests.first() < currentFloor);
     }
 
     public void broadcastState() {
